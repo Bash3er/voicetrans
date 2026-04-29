@@ -10,7 +10,6 @@ import os
 
 
 PACKAGES = [
-    ("faster-whisper",    "faster_whisper"),
     ("sounddevice",       "sounddevice"),
     ("argostranslate",    "argostranslate"),
     ("pyttsx3",           "pyttsx3"),

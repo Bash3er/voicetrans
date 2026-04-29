@@ -9,9 +9,9 @@ outputs translated speech through a virtual microphone — 100% free, 100% local
 
 | Layer       | Tool             | Why                          |
 |-------------|------------------|------------------------------|
-| STT         | faster-whisper   | Fast Whisper on CPU/GPU      |
+| STT         | VOSK             | Offline English STT          |
 | Translation | Argos Translate  | Offline, no API key          |
-| TTS         | pyttsx3          | System TTS, zero latency     |
+| TTS         | pyttsx3 / edge-tts | Local synthetic speech     |
 | Audio       | sounddevice      | Cross-platform audio I/O     |
 | Virtual Mic | VB-Audio Cable   | Routes TTS to game mic input |
 | GUI         | tkinter          | Built into Python            |
@@ -29,7 +29,7 @@ python setup.py
 Or manually:
 
 ```bash
-pip install faster-whisper sounddevice argostranslate pyttsx3 numpy vosk
+pip install sounddevice argostranslate pyttsx3 numpy vosk edge-tts imageio-ffmpeg
 ```
 
 ### 2. Install VB-Audio Virtual Cable (Windows)
@@ -49,7 +49,7 @@ Your real mic / game voice
         ↓
   VoiceTrans (input device = your real mic or VB-Cable)
         ↓
-  Whisper → Argos → pyttsx3
+  VOSK → Argos → TTS
         ↓
   Output device = CABLE Input (VB-Audio Virtual Cable)
         ↓
@@ -90,7 +90,7 @@ Language packs download automatically on first use (~50MB each).
 ```
 voicetrans/
 ├── main.py       ← GUI + app entry point
-├── pipeline.py   ← audio processing loop
+├── pipeline/      ← audio processing package
 ├── setup.py      ← dependency installer
 ├── config.json   ← auto-generated settings
 └── README.md
@@ -100,8 +100,8 @@ voicetrans/
 
 ## Troubleshooting
 
-**"No module named faster_whisper"**
-→ `pip install faster-whisper`
+**"No module named vosk"**
+→ `pip install vosk`
 
 **"No module named argostranslate"**
 → `pip install argostranslate`
@@ -113,7 +113,7 @@ voicetrans/
 → In game settings, set microphone to "CABLE Output (VB-Audio Virtual Cable)"
 
 **High latency**
-→ Use `tiny` whisper model, reduce chunk size to 0.5s
+→ Reduce chunk size to 0.5s for faster response.
 
 **Translation not working**
 → First-time use downloads language pack (~50MB). Wait for it to finish.
@@ -133,6 +133,6 @@ pactl load-module module-null-sink sink_name=voicetrans_out sink_properties=devi
 
 ## Credits
 
-- OpenAI Whisper / faster-whisper by Guillaume Klein
+- VOSK by Alphacephei
 - Argos Translate by LibreTranslate
 - VB-Audio Virtual Cable by Vincent Burel

@@ -3,9 +3,7 @@
   "output_device": 30,
   "src_lang": "en",
   "tgt_lang": "zh",
-  "stt_engine": "whisper",
-  "whisper_model": "base",
-  "chunk_seconds": 0.8,
-  "vad_filter": true,
+  "chunk_seconds": 0.5,
+  "vad_filter": false,
   "theme": "dark"
 }
