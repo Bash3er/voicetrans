@@ -22,6 +22,7 @@ DEFAULT_CONFIG = {
     "output_device": None,
     "src_lang": "en",
     "tgt_lang": "hi",
+    "stt_engine": "vosk",
     "whisper_model": "base",
     "chunk_seconds": 0.8,
     "vad_filter": True,
@@ -267,8 +268,32 @@ class VoiceTransApp:
         lang_frame.columnconfigure(0, weight=1)
         lang_frame.columnconfigure(2, weight=1)
 
-        # ── Whisper Model ──
-        self._section(sidebar, "Whisper Model")
+        # ── STT Engine ──
+        self._section(sidebar, "STT Engine")
+
+        self._engine_var = tk.StringVar(value=self.cfg.get("stt_engine", "vosk"))
+        engine_frame = tk.Frame(sidebar, bg=C["bg2"])
+        engine_frame.pack(padx=12, fill="x", pady=(0, 8))
+
+        for value, label in [("vosk", "VOSK"), ("whisper", "Whisper")]:
+            rb = tk.Radiobutton(
+                engine_frame, text=label,
+                variable=self._engine_var, value=value,
+                font=("Consolas", 9), fg=C["text"], bg=C["bg2"],
+                selectcolor=C["bg3"], activebackground=C["bg2"],
+                command=self._on_engine_change
+            )
+            rb.pack(side="left", padx=(0, 8))
+
+        self._engine_note = tk.Label(
+            sidebar,
+            text="Free offline STT" if self._engine_var.get() == "vosk" else "Whisper model selection applies",
+            font=("Consolas", 8), fg=C["text2"], bg=C["bg2"]
+        )
+        self._engine_note.pack(anchor="w", padx=16)
+
+        # ── STT Model ──
+        self._section(sidebar, "STT Model")
 
         models = ["tiny", "base", "small", "medium"]
         self._model_var = tk.StringVar(value=self.cfg["whisper_model"])
@@ -285,14 +310,19 @@ class VoiceTransApp:
             )
             rb.pack(side="left", padx=(0, 8))
 
-        note = {
+        model_notes = {
             "tiny": "fastest, less accurate",
             "base": "fast and balanced",
             "small": "more accurate, still responsive ✓",
             "medium": "most accurate, slower",
         }
+        model_note_text = (
+            "VOSK ignores Whisper model selection"
+            if self._engine_var.get() == "vosk"
+            else model_notes[self.cfg["whisper_model"]]
+        )
         self._model_note = tk.Label(
-            sidebar, text=note[self.cfg["whisper_model"]],
+            sidebar, text=model_note_text,
             font=("Consolas", 8), fg=C["text2"], bg=C["bg2"]
         )
         self._model_note.pack(anchor="w", padx=16)
@@ -363,7 +393,7 @@ class VoiceTransApp:
         stage_names = [
             ("input",  "Audio In"),
             ("chunk",  "Chunking"),
-            ("stt",    "Whisper"),
+            ("stt",    "STT"),
             ("clean",  "Clean"),
             ("tr",     "Translate"),
             ("tts",    "TTS"),
@@ -463,7 +493,7 @@ class VoiceTransApp:
         self._log_text.tag_config("dim", foreground=self.C["text2"])
 
         self._log("system", "VoiceTrans ready.", "green")
-        self._log("system", "Install deps: pip install faster-whisper sounddevice argostranslate pyttsx3 numpy", "dim")
+        self._log("system", "Install deps: pip install faster-whisper sounddevice argostranslate pyttsx3 numpy vosk", "dim")
         self._log("system", "For virtual mic output: install VB-Audio Cable (free)", "dim")
 
     # ── Device management ────────────────────────────────────────────────
@@ -545,9 +575,19 @@ class VoiceTransApp:
     def _on_model_change(self):
         m = self._model_var.get()
         self.cfg["whisper_model"] = m
-        notes = {"tiny": "fastest, less accurate", "base": "best balance ✓",
-                 "small": "accurate, slower", "medium": "most accurate"}
-        self._model_note.config(text=notes.get(m, ""))
+        if self.cfg.get("stt_engine", "vosk") == "vosk":
+            self._model_note.config(text="VOSK ignores Whisper model selection")
+        else:
+            notes = {"tiny": "fastest, less accurate", "base": "best balance ✓",
+                     "small": "accurate, slower", "medium": "most accurate"}
+            self._model_note.config(text=notes.get(m, ""))
+        save_config(self.cfg)
+
+    def _on_engine_change(self):
+        engine = self._engine_var.get()
+        self.cfg["stt_engine"] = engine
+        note = "Free offline STT" if engine == "vosk" else "Whisper model selection applies"
+        self._engine_note.config(text=note)
         save_config(self.cfg)
 
     def _on_chunk_change(self, *_):
@@ -592,7 +632,9 @@ class VoiceTransApp:
 
         self.running = True
         self._start_btn.config(text="■  STOP TRANSLATION", bg=self.C["danger"])
-        self._status_lbl.config(text="loading whisper model…")
+        engine_label = self.cfg.get("stt_engine", "vosk")
+        status_text = "loading VOSK model…" if engine_label == "vosk" else "loading Whisper model…"
+        self._status_lbl.config(text=status_text)
         self._set_stage_all("idle")
 
         self.pipeline = Pipeline(
@@ -601,6 +643,7 @@ class VoiceTransApp:
             src_lang=self.cfg["src_lang"],
             tgt_lang=self.cfg["tgt_lang"],
             model_size=self.cfg["whisper_model"],
+            stt_engine=self.cfg.get("stt_engine", "vosk"),
             chunk_seconds=self.cfg["chunk_seconds"],
             vad_filter=self.cfg["vad_filter"],
             log_queue=self.log_queue,

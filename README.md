@@ -29,7 +29,7 @@ python setup.py
 Or manually:
 
 ```bash
-pip install faster-whisper sounddevice argostranslate pyttsx3 numpy
+pip install faster-whisper sounddevice argostranslate pyttsx3 numpy vosk
 ```
 
 ### 2. Install VB-Audio Virtual Cable (Windows)

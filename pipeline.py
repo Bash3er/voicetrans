@@ -21,6 +21,7 @@ class Pipeline:
         src_lang: str,
         tgt_lang: str,
         model_size: str,
+        stt_engine: str,
         chunk_seconds: float,
         vad_filter: bool,
         log_queue: queue.Queue,
@@ -31,6 +32,7 @@ class Pipeline:
         self.src_lang = src_lang
         self.tgt_lang = tgt_lang
         self.model_size = model_size
+        self.stt_engine = stt_engine
         self.chunk_seconds = chunk_seconds
         self.vad_filter = vad_filter
         self.log_q = log_queue
@@ -48,6 +50,8 @@ class Pipeline:
 
         # Lazy-loaded modules
         self._whisper = None
+        self._recognizer = None
+        self._vosk_model = None
         self._translator = None
         self._tts = None
         self._tts_voice = None
@@ -94,14 +98,39 @@ class Pipeline:
     # ── Module loading ───────────────────────────────────────────────────────
 
     def _load_stt(self):
-        model_name = self.model_size
-        if self.src_lang == "en" and not model_name.endswith(".en"):
-            model_name = f"{model_name}.en"
-
-        self._log("stt", f"Loading faster-whisper [{model_name}]…", "dim")
+        self._log("stt", f"Loading {self.stt_engine.upper()} STT engine…", "dim")
         self._stage("stt", "active")
-        try:
-            from faster_whisper import WhisperModel
+        if self.stt_engine == "vosk":
+            try:
+                import os
+                import vosk
+            except ImportError:
+                raise RuntimeError(
+                    "vosk not installed.\n"
+                    "Run: pip install vosk"
+                )
+
+            model_path = self._get_vosk_model_path()
+            if not model_path or not os.path.isdir(model_path):
+                self._download_vosk_model(model_path)
+
+            self._vosk_model = vosk.Model(model_path)
+            self._recognizer = vosk.KaldiRecognizer(self._vosk_model, SAMPLE_RATE)
+            self._log("stt", f"VOSK loaded ✓ ({os.path.basename(model_path)})", "green")
+
+        elif self.stt_engine == "whisper":
+            try:
+                from faster_whisper import WhisperModel
+            except ImportError:
+                raise RuntimeError(
+                    "faster-whisper not installed.\n"
+                    "Run: pip install faster-whisper"
+                )
+
+            model_name = self.model_size
+            if self.src_lang == "en" and not model_name.endswith(".en"):
+                model_name = f"{model_name}.en"
+
             compute_type = "int8"
             if self.model_size in {"small", "medium", "base"}:
                 compute_type = "int8_float16"
@@ -115,12 +144,46 @@ class Pipeline:
                     model_name, device="cpu", compute_type="int8"
                 )
             self._log("stt", f"Whisper loaded ✓ ({model_name}, {compute_type})", "green")
-        except ImportError:
-            raise RuntimeError(
-                "faster-whisper not installed.\n"
-                "Run: pip install faster-whisper"
-            )
+
+        else:
+            raise RuntimeError(f"Unsupported STT engine: {self.stt_engine}")
+
         self._stage("stt", "done")
+
+    def _get_vosk_model_path(self):
+        import os
+
+        base_dir = os.path.join(os.path.dirname(__file__), "model")
+        os.makedirs(base_dir, exist_ok=True)
+
+        if self.src_lang == "en":
+            return os.path.join(base_dir, "vosk-model-small-en-us-0.15")
+
+        # Fallback to English model for unsupported languages.
+        self._log(
+            "stt",
+            "VOSK only has English support in this setup; using English model.",
+            "warn",
+        )
+        return os.path.join(base_dir, "vosk-model-small-en-us-0.15")
+
+    def _download_vosk_model(self, model_path: str):
+        import os
+        import urllib.request
+        import zipfile
+
+        url = "https://alphacephei.com/vosk/models/vosk-model-small-en-us-0.15.zip"
+        archive = model_path + ".zip"
+
+        self._log("stt", f"Downloading VOSK model from {url}…", "dim")
+        urllib.request.urlretrieve(url, archive)
+
+        self._log("stt", "Extracting VOSK model…", "dim")
+        with zipfile.ZipFile(archive, "r") as zf:
+            zf.extractall(os.path.dirname(model_path))
+
+        os.unlink(archive)
+        self._log("stt", "VOSK model ready ✓", "green")
 
     def _load_translator(self):
         if self.src_lang == self.tgt_lang:
@@ -277,7 +340,9 @@ class Pipeline:
                 if energy < self._energy_threshold:
                     self._silence_frames += 1
                     if self._speech_active and self._silence_frames <= self._silence_hold:
-                        pass
+                        silence_chunk = np.zeros_like(chunk)
+                        if not self._audio_queue.full():
+                            self._audio_queue.put(silence_chunk)
                     else:
                         self._speech_active = False
                         return
@@ -415,11 +480,13 @@ class Pipeline:
             words = pieces[0].split()
             if len(words) >= 14:
                 return [pieces[0]], ""
+            if len(words) <= 8:
+                return [pieces[0]], ""
             return [], pieces[0]
 
         completed = pieces[:-1]
         tail = pieces[-1]
-        if len(tail.split()) >= 18:
+        if len(tail.split()) >= 12:
             completed.append(tail)
             tail = ""
 
@@ -428,21 +495,44 @@ class Pipeline:
     # ── STT ───────────────────────────────────────────────────────────────────
 
     def _transcribe(self, audio: np.ndarray) -> str:
-        if self._whisper is None:
-            return ""
-        try:
-            beam_size = 3 if self.model_size == "tiny" else 5
-            segments, info = self._whisper.transcribe(
-                audio,
-                language=self.src_lang if self.src_lang != "auto" else None,
-                vad_filter=self.vad_filter,
-                beam_size=beam_size,
-            )
-            text = " ".join(seg.text for seg in segments).strip()
-            return text
-        except Exception as e:
-            self._log("stt", f"Transcription error: {e}", "err")
-            return ""
+        if self.stt_engine == "vosk":
+            if self._recognizer is None:
+                return ""
+
+            try:
+                if audio.ndim > 1:
+                    audio = audio.mean(axis=1)
+
+                pcm = (audio * 32767.0).astype(np.int16).tobytes()
+                accepted = self._recognizer.AcceptWaveform(pcm)
+                if not accepted:
+                    return ""
+
+                import json
+                payload = json.loads(self._recognizer.Result())
+                return payload.get("text", "").strip()
+            except Exception as e:
+                self._log("stt", f"Transcription error: {e}", "err")
+                return ""
+
+        if self.stt_engine == "whisper":
+            if self._whisper is None:
+                return ""
+            try:
+                beam_size = 3 if self.model_size == "tiny" else 5
+                segments, info = self._whisper.transcribe(
+                    audio,
+                    language=self.src_lang if self.src_lang != "auto" else None,
+                    vad_filter=self.vad_filter,
+                    beam_size=beam_size,
+                )
+                text = " ".join(seg.text for seg in segments).strip()
+                return text
+            except Exception as e:
+                self._log("stt", f"Transcription error: {e}", "err")
+                return ""
+
+        return ""
 
     # ── Translation ───────────────────────────────────────────────────────────
 

@@ -16,6 +16,7 @@ PACKAGES = [
     ("pyttsx3",           "pyttsx3"),
     ("edge-tts",          "edge_tts"),
     ("imageio-ffmpeg",    "imageio_ffmpeg"),
+    ("vosk",              "vosk"),
     ("numpy",             "numpy"),
 ]
 
