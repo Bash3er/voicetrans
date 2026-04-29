@@ -19,6 +19,13 @@ def load_stt(self):
     self._stage("stt", "done")
 
 
+def _reset_recognizer(self):
+    import vosk
+    if self._vosk_model is None:
+        return
+    self._recognizer = vosk.KaldiRecognizer(self._vosk_model, self.SAMPLE_RATE)
+
+
 def _get_vosk_model_path(self):
     import os
     base_dir = os.path.join(os.path.dirname(__file__), "..", "model")
@@ -54,12 +61,18 @@ def transcribe(self, audio):
     try:
         if audio.ndim > 1:
             audio = audio.mean(axis=1)
+        if np.max(np.abs(audio)) < 1e-4:
+            import json
+            result = json.loads(self._recognizer.FinalResult()).get("text", "").strip()
+            _reset_recognizer(self)
+            return result
+
         pcm = (audio * 32767.0).astype(np.int16).tobytes()
         accepted = self._recognizer.AcceptWaveform(pcm)
-        if not accepted:
-            return ""
-        import json
-        return json.loads(self._recognizer.Result()).get("text", "").strip()
+        if accepted:
+            import json
+            return json.loads(self._recognizer.Result()).get("text", "").strip()
+        return ""
     except Exception as e:
         self._log("stt", f"Transcription error: {e}", "err")
         return ""
