@@ -287,9 +287,9 @@ class VoiceTransApp:
 
         note = {
             "tiny": "fastest, less accurate",
-            "base": "best balance ✓",
-            "small": "accurate, slower",
-            "medium": "most accurate",
+            "base": "fast and balanced",
+            "small": "more accurate, still responsive ✓",
+            "medium": "most accurate, slower",
         }
         self._model_note = tk.Label(
             sidebar, text=note[self.cfg["whisper_model"]],

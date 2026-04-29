@@ -14,6 +14,8 @@ PACKAGES = [
     ("sounddevice",       "sounddevice"),
     ("argostranslate",    "argostranslate"),
     ("pyttsx3",           "pyttsx3"),
+    ("edge-tts",          "edge_tts"),
+    ("imageio-ffmpeg",    "imageio_ffmpeg"),
     ("numpy",             "numpy"),
 ]
 

@@ -43,13 +43,14 @@ class Pipeline:
         self._pending_tail: str = ""
         self._speech_active = False
         self._silence_frames = 0
-        self._energy_threshold = 0.012
+        self._energy_threshold = 0.006
         self._silence_hold = 2
 
         # Lazy-loaded modules
         self._whisper = None
         self._translator = None
         self._tts = None
+        self._tts_voice = None
 
     # ── Public ──────────────────────────────────────────────────────────────
 
@@ -93,14 +94,27 @@ class Pipeline:
     # ── Module loading ───────────────────────────────────────────────────────
 
     def _load_stt(self):
-        self._log("stt", f"Loading faster-whisper [{self.model_size}]…", "dim")
+        model_name = self.model_size
+        if self.src_lang == "en" and not model_name.endswith(".en"):
+            model_name = f"{model_name}.en"
+
+        self._log("stt", f"Loading faster-whisper [{model_name}]…", "dim")
         self._stage("stt", "active")
         try:
             from faster_whisper import WhisperModel
-            self._whisper = WhisperModel(
-                self.model_size, device="cpu", compute_type="int8"
-            )
-            self._log("stt", "Whisper loaded ✓", "green")
+            compute_type = "int8"
+            if self.model_size in {"small", "medium", "base"}:
+                compute_type = "int8_float16"
+            try:
+                self._whisper = WhisperModel(
+                    model_name, device="cpu", compute_type=compute_type
+                )
+            except Exception as e:
+                self._log("stt", f"compute_type={compute_type} failed, falling back to int8: {e}", "warn")
+                self._whisper = WhisperModel(
+                    model_name, device="cpu", compute_type="int8"
+                )
+            self._log("stt", f"Whisper loaded ✓ ({model_name}, {compute_type})", "green")
         except ImportError:
             raise RuntimeError(
                 "faster-whisper not installed.\n"
@@ -158,33 +172,77 @@ class Pipeline:
     def _load_tts(self):
         self._log("tts", "Loading TTS engine…", "dim")
         self._stage("tts", "active")
+        self._tts_engine = None
+        self._tts_voice = None
+
         try:
-            import pyttsx3
-            engine = pyttsx3.init()
-            engine.setProperty("rate", 165)
-            voices = engine.getProperty("voices")
-            self._log("tts", f"Available voices: {len(voices)}", "dim")
-            if voices:
-                voice_summaries = []
-                for voice in voices[:3]:
-                    details = []
-                    if hasattr(voice, 'name'):
-                        details.append(str(voice.name))
-                    if hasattr(voice, 'id'):
-                        details.append(str(voice.id))
-                    voice_summaries.append("/".join(details))
-                self._log("tts", f"Voices: {', '.join(voice_summaries)}", "dim")
-            else:
-                self._log("tts", "No TTS voices found", "warn")
-            self._tts_engine = engine
-            self._log("tts", "pyttsx3 TTS ready ✓", "green")
-            self._tts = "pyttsx3"
-        except ImportError:
-            self._log("tts", "pyttsx3 not found, TTS disabled. Run: pip install pyttsx3", "warn")
-            self._tts = None
+            import edge_tts
+            import os
+            from imageio_ffmpeg import get_ffmpeg_exe
+
+            ffmpeg_path = get_ffmpeg_exe()
+            if not ffmpeg_path or not os.path.exists(ffmpeg_path):
+                raise RuntimeError("ffmpeg executable not found for MP3 decoding")
+
+            self._log("tts", "edge-tts + MP3 decoder ready", "dim")
+            self._tts = "edge-tts"
+            self._tts_voice = self._select_edge_voice()
+            self._log("tts", f"Selected edge-tts voice: {self._tts_voice}", "dim")
+        except Exception as e:
+            self._log("tts", f"edge-tts unavailable: {e}", "warn")
+            try:
+                import pyttsx3
+                engine = pyttsx3.init()
+                engine.setProperty("rate", 165)
+                voices = engine.getProperty("voices")
+                self._log("tts", f"Available voices: {len(voices)}", "dim")
+                preferred_voice = None
+                if voices:
+                    voice_summaries = []
+                    for voice in voices[:5]:
+                        details = []
+                        if hasattr(voice, 'name'):
+                            details.append(str(voice.name))
+                        if hasattr(voice, 'id'):
+                            details.append(str(voice.id))
+                        if hasattr(voice, 'languages') and voice.languages:
+                            details.append(str(voice.languages))
+                        voice_summaries.append("/".join(details))
+
+                        lower_id = getattr(voice, 'id', '')
+                        lower_name = getattr(voice, 'name', '')
+                        langs = []
+                        if hasattr(voice, 'languages'):
+                            langs = [str(l).lower() for l in voice.languages]
+                        if self.tgt_lang == "en":
+                            if "en" in lower_id.lower() or "english" in lower_name.lower() or any("en" in l for l in langs):
+                                preferred_voice = voice
+                                break
+
+                    self._log("tts", f"Voices: {', '.join(voice_summaries)}", "dim")
+
+                if preferred_voice is not None:
+                    self._tts_voice = preferred_voice.id
+                    self._log("tts", f"Selected voice: {getattr(preferred_voice, 'name', preferred_voice.id)}", "dim")
+                else:
+                    default_voice = engine.getProperty('voice')
+                    self._tts_voice = default_voice
+                    self._log("tts", f"Selected default voice: {default_voice}", "dim")
+
+                engine.stop()
+                self._tts_engine = None
+                self._log("tts", "pyttsx3 TTS ready ✓", "green")
+                self._tts = "pyttsx3"
+            except ImportError:
+                self._log("tts", "pyttsx3 not found, TTS disabled. Run: pip install pyttsx3", "warn")
+                self._tts = None
+            except Exception as e:
+                self._log("tts", f"TTS engine error: {e}", "err")
+                self._tts = None
         except Exception as e:
             self._log("tts", f"TTS engine error: {e}", "err")
             self._tts = None
+
         self._stage("tts", "done")
 
     # ── Audio capture ─────────────────────────────────────────────────────────
@@ -373,11 +431,12 @@ class Pipeline:
         if self._whisper is None:
             return ""
         try:
+            beam_size = 3 if self.model_size == "tiny" else 5
             segments, info = self._whisper.transcribe(
                 audio,
                 language=self.src_lang if self.src_lang != "auto" else None,
                 vad_filter=self.vad_filter,
-                beam_size=3,
+                beam_size=beam_size,
             )
             text = " ".join(seg.text for seg in segments).strip()
             return text
@@ -404,9 +463,10 @@ class Pipeline:
         if self._tts is None:
             return None
 
+        if self._tts == "edge-tts":
+            return self._edge_tts_to_numpy(text)
+
         if self._tts == "pyttsx3":
-            # pyttsx3 plays directly — we route it to the output device
-            # For virtual mic routing we use sounddevice playback
             return self._pyttsx3_to_numpy(text)
 
         return None
@@ -417,19 +477,23 @@ class Pipeline:
         if not text or not text.strip():
             return None
 
-        engine = self._tts_engine or pyttsx3.init()
-        local_engine = self._tts_engine is None
+        import pyttsx3
+        engine = pyttsx3.init()
         tmp_path = None
 
         try:
             engine.setProperty("rate", 165)
+            if self._tts_voice:
+                try:
+                    engine.setProperty("voice", self._tts_voice)
+                except Exception:
+                    self._log("tts", f"Unable to set voice id {self._tts_voice}", "warn")
             with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
                 tmp_path = f.name
 
             engine.save_to_file(text, tmp_path)
             engine.runAndWait()
-            if local_engine:
-                engine.stop()
+            engine.stop()
 
             if not tmp_path or not os.path.exists(tmp_path):
                 return None
@@ -470,6 +534,96 @@ class Pipeline:
             self._log("tts", f"TTS error: {e}", "err")
             return None
 
+        finally:
+            if tmp_path and os.path.exists(tmp_path):
+                try:
+                    os.unlink(tmp_path)
+                except Exception:
+                    pass
+
+    def _select_edge_voice(self) -> str:
+        mapping = {
+            "en": "en-US-GuyNeural",
+            "hi": "hi-IN-SwaraNeural",
+            "ml": "en-IN-MadhurNeural",
+            "ta": "ta-IN-ValluvarNeural",
+            "te": "te-IN-SwarachitraNeural",
+            "de": "de-DE-KatjaNeural",
+            "fr": "fr-FR-DeniseNeural",
+            "es": "es-ES-ElviraNeural",
+            "ru": "ru-RU-DariyaNeural",
+            "zh": "zh-CN-XiaoxiaoNeural",
+            "ja": "ja-JP-NanamiNeural",
+            "ko": "ko-KR-SunHiNeural",
+            "ar": "ar-EG-SalmaNeural",
+            "pt": "pt-BR-FranciscaNeural",
+        }
+        return mapping.get(self.tgt_lang, "en-US-GuyNeural")
+
+    def _edge_tts_to_numpy(self, text: str) -> Optional[np.ndarray]:
+        import tempfile, os, asyncio
+        if not text or not text.strip():
+            return None
+
+        try:
+            import edge_tts
+        except ImportError:
+            self._log("tts", "edge-tts import failed", "err")
+            return None
+
+        tmp_path = None
+        try:
+            tmp_path = tempfile.mktemp(suffix=".mp3")
+            voice = self._tts_voice or self._select_edge_voice()
+
+            async def save_audio():
+                communicate = edge_tts.Communicate(text, voice=voice)
+                await communicate.save(tmp_path)
+
+            asyncio.run(save_audio())
+
+            if not tmp_path or not os.path.exists(tmp_path):
+                self._log("tts", "edge-tts output file missing", "warn")
+                return None
+
+            from imageio_ffmpeg import get_ffmpeg_exe
+            import subprocess
+
+            ffmpeg_path = get_ffmpeg_exe()
+            if not ffmpeg_path:
+                self._log("tts", "ffmpeg not found for MP3 decoding", "err")
+                return None
+
+            command = [
+                ffmpeg_path,
+                "-y",
+                "-loglevel", "error",
+                "-i", tmp_path,
+                "-f", "s16le",
+                "-acodec", "pcm_s16le",
+                "-ac", "1",
+                "-ar", str(SAMPLE_RATE),
+                "pipe:1",
+            ]
+            proc = subprocess.run(command, capture_output=True)
+            if proc.returncode != 0:
+                self._log("tts", f"ffmpeg decode failed: {proc.stderr.decode(errors='ignore').strip()}", "err")
+                return None
+
+            raw = proc.stdout
+            if not raw:
+                self._log("tts", "ffmpeg returned empty audio", "warn")
+                return None
+
+            samples = np.frombuffer(raw, dtype=np.int16).astype(np.float32) / 32768.0
+            if samples.size == 0:
+                self._log("tts", "Decoded audio array is empty", "warn")
+                return None
+
+            return samples
+        except Exception as e:
+            self._log("tts", f"edge-tts error: {e}", "err")
+            return None
         finally:
             if tmp_path and os.path.exists(tmp_path):
                 try:
